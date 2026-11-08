@@ -1,0 +1,44 @@
+# Три процесса из одного образа и одна общая БД на постоянном томе.
+# Переменные (токены и т.д.) задаются в Coolify → Environment Variables.
+
+x-bot: &bot
+  build: .
+  restart: unless-stopped
+  volumes:
+    - bot_data:/app/data
+  environment:
+    - DB_PATH=/app/data/bot.db
+    - TZ_NAME=${TZ_NAME:-Europe/Moscow}
+    - ADMIN_TG_IDS=${ADMIN_TG_IDS:-}
+    - ADMIN_VK_IDS=${ADMIN_VK_IDS:-}
+    - DIGEST_DAY=${DIGEST_DAY:-0}
+    - DIGEST_HOUR=${DIGEST_HOUR:-10}
+    - DIGEST_DAYS=${DIGEST_DAYS:-14}
+
+services:
+  tg-bot:
+    <<: *bot
+    command: python tg_bot.py
+    environment:
+      - DB_PATH=/app/data/bot.db
+      - TZ_NAME=${TZ_NAME:-Europe/Moscow}
+      - ADMIN_TG_IDS=${ADMIN_TG_IDS:-}
+      - ADMIN_VK_IDS=${ADMIN_VK_IDS:-}
+      - TG_TOKEN=${TG_TOKEN}
+
+  vk-bot:
+    <<: *bot
+    command: python vk_bot.py
+    environment:
+      - DB_PATH=/app/data/bot.db
+      - TZ_NAME=${TZ_NAME:-Europe/Moscow}
+      - ADMIN_TG_IDS=${ADMIN_TG_IDS:-}
+      - ADMIN_VK_IDS=${ADMIN_VK_IDS:-}
+      - VK_TOKEN=${VK_TOKEN}
+
+  scheduler:
+    <<: *bot
+    command: python scheduler.py
+
+volumes:
+  bot_data:
