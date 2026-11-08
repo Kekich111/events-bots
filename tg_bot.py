@@ -36,14 +36,14 @@ async def send_reply(chat_id: int, r: commands.Reply):
 
 @dp.message(F.text, F.chat.type == "private")
 async def on_text(m: Message):
-    r = commands.handle("tg", m.from_user.id, m.from_user.full_name, m.text)
+    r = commands.handle("tg", m.from_user.id, m.from_user.full_name, m.text, m.from_user.username)
     await send_reply(m.chat.id, r)
 
 
 @dp.callback_query()
 async def on_button(cb: CallbackQuery):
     await cb.answer()  # убрать «часики» на кнопке
-    r = commands.handle("tg", cb.from_user.id, cb.from_user.full_name, cb.data or "")
+    r = commands.handle("tg", cb.from_user.id, cb.from_user.full_name, cb.data or "", cb.from_user.username)
     await send_reply(cb.from_user.id, r)
 
 

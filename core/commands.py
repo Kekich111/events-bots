@@ -31,14 +31,15 @@ BTN_HELP = "❓ Помощь"
 BTN_NEWEVENT = "➕ Мероприятие"
 BTN_TICKETS = "🎫 Обращения"
 BTN_BROADCAST = "📢 Рассылка"
+BTN_LINK = "🔗 Связать аккаунты"
 
-MENU_USER = [[BTN_EVENTS, BTN_TEAMS], [BTN_SUB, BTN_SUPPORT]]
+MENU_USER = [[BTN_EVENTS, BTN_TEAMS], [BTN_SUB, BTN_SUPPORT], [BTN_LINK]]
 MENU_ADMIN = MENU_USER + [[BTN_NEWEVENT, BTN_TICKETS, BTN_BROADCAST]]
 
 ALIASES = {
     BTN_EVENTS: "/events", BTN_TEAMS: "/myteams", BTN_SUB: "/sub",
     BTN_SUPPORT: "/support", BTN_HELP: "/help", BTN_NEWEVENT: "/event_new",
-    BTN_TICKETS: "/tickets", BTN_BROADCAST: "/broadcast",
+    BTN_TICKETS: "/tickets", BTN_BROADCAST: "/broadcast", BTN_LINK: "/link",
     "начать": "/start", "start": "/start", "помощь": "/help",
 }
 CANCEL = [("✖ Отмена", "/cancel")]
@@ -94,6 +95,23 @@ def user_team_on_event(c, user_id: int, event_id: int):
     ).fetchone()
 
 
+def members_of(c, tid: int):
+    return c.execute(
+        "SELECT u.*, (t.captain_id=u.id) AS is_cap FROM team_members m "
+        "JOIN users u ON u.id=m.user_id JOIN teams t ON t.id=m.team_id "
+        "WHERE m.team_id=? ORDER BY m.rowid", (tid,)
+    ).fetchall()
+
+
+def fmt_member(m) -> str:
+    contacts = []
+    if m["tg_username"]:
+        contacts.append("@" + m["tg_username"])
+    if m["vk_id"]:
+        contacts.append(f"vk.com/id{m['vk_id']}")
+    return ("👑 " if m["is_cap"] else "") + m["name"] + (" — " + ", ".join(contacts) if contacts else "")
+
+
 def upcoming_event(c, event_id: int):
     e = c.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
     if not e:
@@ -126,14 +144,14 @@ def clear_state(u):
 
 def cmd_start(u, a):
     return Reply(f"Привет, {u['name']}! 👋\nЯ показываю мероприятия, помогаю собирать команды и отвечаю на вопросы.\n\n"
-                 "Пользуйтесь кнопками внизу 👇", [[("📅 Ближайшие мероприятия", "/events")]])
+                 "Пользуетесь и Telegram, и VK? Нажмите «🔗 Связать аккаунты».\nПользуйтесь кнопками внизу 👇")
 
 
 def cmd_help(u, a):
     t = (
         "Всё делается кнопками внизу. Текстом тоже можно:\n"
         "/events — мероприятия\n"
-        "/myteams — мои команды\n"
+        "/myteams — мои команды; /team <№> — состав команды\n"
         "/sub — вкл/выкл рассылку\n"
         "/support — написать организаторам (любое сообщение без «/» тоже уйдёт им)\n"
         "/link — связать аккаунты Telegram и VK\n"
@@ -177,13 +195,17 @@ def cmd_event(u, a):
             "SELECT t.*, u.name AS cap, (SELECT COUNT(*) FROM team_members WHERE team_id=t.id) AS n "
             "FROM teams t JOIN users u ON u.id=t.captain_id WHERE t.event_id=?", (eid,)
         ).fetchall()
+        members = {t["id"]: members_of(c, t["id"]) for t in teams} if u["is_admin"] else {}
+        mine = {r[0] for r in c.execute("SELECT team_id FROM team_members WHERE user_id=?", (u["id"],))}
     buttons = []
     if teams:
         out.append("\nКоманды:")
         for t in teams:
             out.append(f"• «{t['name']}» — {t['n']}/{t['max_size']}, капитан {t['cap']}"
-                       + ("" if t["n"] < t["max_size"] else " (заполнена)"))
-            if t["n"] < t["max_size"] and len(buttons) < 5:
+                       + ("" if t["n"] < t["max_size"] else " (заполнена)") + (" ✅ вы в ней" if t["id"] in mine else ""))
+            for m in members.get(t["id"], []):
+                out.append("     – " + fmt_member(m))
+            if t["n"] < t["max_size"] and t["id"] not in mine and len(buttons) < 5:
                 buttons.append([(f"Вступить: {t['name'][:20]} ({t['n']}/{t['max_size']})", f"/join {t['id']}")])
     else:
         out.append("\nКоманд пока нет — создайте первую 👇")
@@ -312,7 +334,24 @@ def cmd_myteams(u, a):
     text = "👥 Ваши команды:\n\n" + "\n".join(
         f"«{r['name']}» {'👑' if r['captain_id'] == u['id'] else ''}\n"
         f"   {r['title']} — {fmt_dt(r['starts_at'])}, {r['n']}/{r['max_size']} чел." for r in rows)
-    return Reply(text, [[(f"🚪 Выйти: {r['name'][:28]}", f"/leave {r['id']}")] for r in rows[:8]])
+    return Reply(text, [[(f"👥 Состав: {r['name'][:22]}", f"/team {r['id']}"), ("🚪 Выйти", f"/leave {r['id']}")]
+                        for r in rows[:4]])
+
+
+def cmd_team(u, a):
+    tid = parse_int(a, "Укажите номер команды.")
+    with db() as c:
+        t = c.execute("SELECT t.*, e.title, e.starts_at FROM teams t JOIN events e ON e.id=t.event_id "
+                      "WHERE t.id=?", (tid,)).fetchone()
+        if not t:
+            raise UserError("Команда не найдена.")
+        ms = members_of(c, tid)
+    mine = any(m["id"] == u["id"] for m in ms)
+    if not mine and not u["is_admin"]:
+        raise UserError("Состав видят только участники команды и организаторы.")
+    text = (f"👥 «{t['name']}» — {t['title']}, {fmt_dt(t['starts_at'])}\nУчастников: {len(ms)}/{t['max_size']}\n\n"
+            + "\n".join(f"{i}. {fmt_member(m)}" for i, m in enumerate(ms, 1)))
+    return Reply(text, ([[("🚪 Выйти из команды", f"/leave {tid}")]] if mine else []) + [[("👥 Мои команды", "/myteams")]])
 
 
 # ---------- поддержка ----------
@@ -342,27 +381,31 @@ def cmd_cancel(u, a):
 
 # ---------- привязка аккаунтов ----------
 
-def cmd_link(u, a):
-    code = a.strip().upper()
-    if not code:
-        code = secrets.token_hex(3).upper()
-        with db() as c:
-            c.execute("DELETE FROM link_codes WHERE user_id=?", (u["id"],))
-            c.execute("INSERT INTO link_codes VALUES(?,?,?)",
-                      (code, u["id"], (now() + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M")))
-        return f"🔗 Код: {code}\nВ течение 15 минут отправьте в боте другой соцсети:\n/link {code}"
+def new_link_code(u) -> str:
+    code = secrets.token_hex(3).upper()
+    with db() as c:
+        c.execute("DELETE FROM link_codes WHERE user_id=?", (u["id"],))
+        c.execute("INSERT INTO link_codes VALUES(?,?,?)",
+                  (code, u["id"], (now() + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M")))
+    return code
+
+
+def use_link_code(u, code: str) -> str:
+    code = code.strip().upper()
     cols = ("tg_id", "vk_id")
     with db() as c:
         row = c.execute("SELECT * FROM link_codes WHERE code=? AND expires_at>=?", (code, now_s())).fetchone()
         if not row:
-            raise UserError("Код не найден или истёк. Получите новый: /link")
+            raise UserError("Код не найден или истёк. Получите новый в другом боте («🔗 Связать аккаунты» → «Получить код»).")
         keep = c.execute("SELECT * FROM users WHERE id=?", (row["user_id"],)).fetchone()
         drop = c.execute("SELECT * FROM users WHERE id=?", (u["id"],)).fetchone()
         if keep["id"] == drop["id"]:
-            raise UserError("Код создан в этом же боте — введите его в другом.")
+            raise UserError("Этот код создан в этом же боте — отправьте его в боте другой соцсети.")
         if any(keep[col] and drop[col] for col in cols):
             raise UserError("К тому аккаунту уже привязан другой профиль этой соцсети.")
         vals = {col: drop[col] for col in cols if drop[col]}
+        if drop["tg_username"] and not keep["tg_username"]:
+            vals["tg_username"] = drop["tg_username"]
         c.execute("INSERT OR IGNORE INTO team_members(team_id, user_id) "
                   "SELECT team_id, ? FROM team_members WHERE user_id=?", (keep["id"], drop["id"]))
         c.execute("DELETE FROM team_members WHERE user_id=?", (drop["id"],))
@@ -374,7 +417,26 @@ def cmd_link(u, a):
         c.execute(f"UPDATE users SET {sets}, is_admin=? WHERE id=?",
                   (*vals.values(), max(keep["is_admin"], drop["is_admin"]), keep["id"]))
         c.execute("DELETE FROM users WHERE id=?", (drop["id"],))
-    return "✅ Аккаунты связаны: команды и обращения теперь общие. Уведомления приходят в Telegram."
+    return Reply("✅ Аккаунты связаны: команды и обращения теперь общие. Уведомления приходят в Telegram.",
+                 [[("👥 Мои команды", "/myteams")]])
+
+
+def cmd_link(u, a):
+    if a:  # /link КОД
+        return use_link_code(u, a)
+    set_state(u, "link_code")
+    return Reply("🔗 Связать Telegram и VK — чтобы команды, обращения и уведомления были общими.\n\n"
+                 "1) В одном боте нажмите «Получить код».\n"
+                 "2) В другом боте нажмите «🔗 Связать аккаунты» и отправьте этот код сообщением.\n\n"
+                 "Если код у вас уже есть — просто отправьте его сюда.",
+                 [[("🔑 Получить код", "/link_new")], CANCEL])
+
+
+def cmd_link_new(u, a):
+    code = new_link_code(u)
+    return Reply(f"🔑 Ваш код: {code}\nДействует 15 минут.\n\n"
+                 "Теперь откройте бота в другой соцсети, нажмите «🔗 Связать аккаунты» и отправьте этот код.",
+                 [[("✔ Готово", "/cancel")]])
 
 
 # ---------- организатор ----------
@@ -565,6 +627,10 @@ def cmd_close(u, a):
 def continue_dialog(u, st, text: str):
     state, d = st
     skip = text == "-"
+    if state == "link_code":
+        r = use_link_code(u, text)
+        clear_state(u)
+        return r
     if state == "support":
         return Reply(support_message(u, text) + "\nМожно дописать ещё.", [[("✔ Готово", "/cancel")]])
     if state == "team_name":
@@ -646,7 +712,7 @@ def continue_dialog(u, st, text: str):
 COMMANDS = {
     "start": cmd_start, "help": cmd_help, "events": cmd_events, "event": cmd_event,
     "team_create": cmd_team_create, "team_new": cmd_team_new, "join": cmd_join, "leave": cmd_leave,
-    "myteams": cmd_myteams, "sub": cmd_sub, "subscribe": lambda u, a: set_sub(u, 1),
+    "myteams": cmd_myteams, "team": cmd_team, "link_new": cmd_link_new, "sub": cmd_sub, "subscribe": lambda u, a: set_sub(u, 1),
     "unsubscribe": lambda u, a: set_sub(u, 0), "support": cmd_support, "cancel": cmd_cancel, "link": cmd_link,
     "event_new": cmd_event_new, "event_add": cmd_event_add, "event_del": cmd_event_del,
     "event_del_yes": cmd_event_del_yes, "event_edit": cmd_event_edit, "event_field": cmd_event_field,
@@ -656,9 +722,9 @@ COMMANDS = {
 ADMIN_ONLY = {"event_new", "event_add", "event_del", "event_del_yes", "event_edit", "event_field", "broadcast", "tickets", "ticket", "reply", "close"}
 
 
-def handle(platform: str, pid: int, name: str, text: str) -> Reply:
+def handle(platform: str, pid: int, name: str, text: str, username: str = None) -> Reply:
     """Единая точка входа для обоих ботов."""
-    u = get_or_create_user(platform, pid, name)
+    u = get_or_create_user(platform, pid, name, username)
     text = (text or "").strip()
     try:
         if not text:

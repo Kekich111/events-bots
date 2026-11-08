@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS users (
     tg_id INTEGER UNIQUE,
     vk_id INTEGER UNIQUE,
     name TEXT NOT NULL DEFAULT '',
+    tg_username TEXT,
     is_admin INTEGER NOT NULL DEFAULT 0,
     subscribed INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
@@ -132,6 +133,9 @@ def init():
     with db() as c:
         c.execute("PRAGMA journal_mode=WAL")  # два бота пишут в одну БД
         c.executescript(SCHEMA)
+        # миграция старых баз: добавляем столбец с Telegram-юзернеймом
+        if "tg_username" not in {r["name"] for r in c.execute("PRAGMA table_info(users)")}:
+            c.execute("ALTER TABLE users ADD COLUMN tg_username TEXT")
         # заранее заводим админов, чтобы им приходили обращения из поддержки
         for platform, ids in ADMIN_IDS.items():
             col = COL[platform]
@@ -143,7 +147,7 @@ def init():
                     )
 
 
-def get_or_create_user(platform: str, pid: int, name: str) -> dict:
+def get_or_create_user(platform: str, pid: int, name: str, username: str = None) -> dict:
     col = COL[platform]
     with db() as c:
         row = c.execute(f"SELECT * FROM users WHERE {col}=?", (pid,)).fetchone()
@@ -159,6 +163,9 @@ def get_or_create_user(platform: str, pid: int, name: str) -> dict:
                 c.execute("UPDATE users SET is_admin=1 WHERE id=?", (row["id"],))
             if name and (not row["name"] or row["name"] == "Организатор"):
                 c.execute("UPDATE users SET name=? WHERE id=?", (name, row["id"]))
+            row = c.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
+        if platform == "tg" and (row["tg_username"] or None) != (username or None):
+            c.execute("UPDATE users SET tg_username=? WHERE id=?", (username or None, row["id"]))
             row = c.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
         return dict(row)
 
